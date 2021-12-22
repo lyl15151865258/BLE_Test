@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+    plugins {
+        id 'com.android.application' version '7.1.0-alpha13'
+        id 'com.android.library' version '7.1.0-alpha13'
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        jcenter()
+        mavenCentral()
+        flatDir {
+            dirs 'app/libs'
+        }
+    }
+}
+rootProject.name = "bletest"
+include ':app',':viselog',':baseble'
