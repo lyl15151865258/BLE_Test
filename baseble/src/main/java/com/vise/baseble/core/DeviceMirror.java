@@ -355,10 +355,10 @@ public class DeviceMirror {
      * @param data
      */
     public void writeData(byte[] data) {
-        if (data == null || data.length > 20) {
-            ViseLog.e("this data is null or length beyond 20 byte.");
-            return;
-        }
+//        if (data == null || data.length > 20) {
+//            ViseLog.e("this data is null or length beyond 20 byte.");
+//            return;
+//        }
         if (!checkBluetoothGattInfo(writeInfoMap)) {
             return;
         }

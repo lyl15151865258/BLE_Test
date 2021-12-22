@@ -4,6 +4,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
@@ -12,6 +13,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.provider.Settings;
 import android.view.LayoutInflater;
@@ -47,12 +49,19 @@ import com.zyao89.view.zloading.Z_TYPE;
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.Queue;
 import java.util.UUID;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
 
     private final int CODE_BLE_RECV = 0x01;
     public final int GPS_REQUEST_CODE = 0x02;
+    private final int CODE_BLE_SEND = 0x03;
+
+    private final int send_max_len = 244; //发送最大长度
+    private final int send_min_len = 20; //发送最小长度
+    private boolean isChangeMTU = false;
 
     private final String uuid_str = "0000e0ff-3c17-d293-8e48-14fe2e4da212"; //SERVICE UUID
     private final String characteristic_write_str = "0000ffe1-0000-1000-8000-00805f9b34fb"; //WIRTE
@@ -74,6 +83,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private ListView recvLv;
     private Button clearBtn;
     private ZLoadingDialog connectDialog;
+    private TextView recvInfoTv;
+    private TextView sendInfoTv;
 
     private BluetoothLeDevice bleDeivce;
     private DeviceMirror bleDeviceMirror; //发送&接收数据
@@ -84,6 +95,9 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
 
     private ArrayAdapter<String> recvDataAdapter;
     private ArrayList<String> recvDataList = new ArrayList<>();
+
+    private int recvLen;
+    private int sendLen;
 
     /**
      * 设备选择回调
@@ -199,6 +213,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         @Override
         public void onSuccess(byte[] data, BluetoothGattChannel bluetoothGattChannel, BluetoothLeDevice bluetoothLeDevice) {
             String recv_str;
+            recvLen += data.length; //计算接收长度
             if(recvAsciiBtn.isChecked()){
                 recv_str = new String(data, StandardCharsets.UTF_8);
             }else{
@@ -223,8 +238,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
 
             switch (msg.what){
                 case CODE_BLE_RECV:
+                    recvInfoTv.setText(String.format("%s Bytes", recvLen));
                     recvDataList.add(msg.obj.toString());
                     recvDataAdapter.notifyDataSetChanged();
+                    break;
+                case CODE_BLE_SEND:
+                    sendInfoTv.setText(String.format("%s Bytes", sendLen));
                     break;
             }
 
@@ -269,6 +288,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         deviceDialog = new DeviceDialog(this, deviceSearchListener);
         inputEdit = findViewById(R.id.input_edit);
         recvLv = findViewById(R.id.recv_lv);
+        recvInfoTv = findViewById(R.id.recv_info_tv);
+        sendInfoTv = findViewById(R.id.send_info_tv);
 
         connectDialog = new ZLoadingDialog(this);
         connectDialog.setLoadingBuilder(Z_TYPE.DOUBLE_CIRCLE)
@@ -297,6 +318,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         recvLv.setAdapter(recvDataAdapter);
     }
 
+    @SuppressLint("SetTextI18n")
     @Override
     public void onClick(View v) {
         switch (v.getId()){
@@ -326,6 +348,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                     recvDataList.clear();
                     recvDataAdapter.notifyDataSetChanged();
                 }
+                recvLen = 0;
+                sendLen = 0;
+                recvInfoTv.setText("0 Bytes");
+                sendInfoTv.setText("0 Bytes");
                 break;
         }
     }
@@ -393,6 +419,17 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         //绑定接收通道
         bindChannel(PropertyType.PROPERTY_NOTIFY, serviceUUID, characteristicNotifyUUID, null, bleCallback);
         bleDeviceMirror.registerNotify(false);
+        //修改MTU长度
+        isChangeMTU = bleDeviceMirror.getBluetoothGatt().requestMtu(send_max_len);
+        if(isChangeMTU){
+            ViseLog.e("修改MTU成功");
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(mContext, "修改MTU成功", Toast.LENGTH_LONG).show();
+                }
+            });
+        }
     }
 
     /**
@@ -431,13 +468,16 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      */
     private void sendData(){
         String cmd = inputEdit.getText().toString();
+        byte[] result = null;
         if(asciiBtn.isChecked()){
-            bleWriteData(cmd);
+            result = cmd.getBytes(StandardCharsets.UTF_8);
         }else if(hexBtn.isChecked()){
             cmd = DataTransform.checkHexLength(cmd);
             inputEdit.setText(cmd);
-            bleWriteData(DataTransform.hexTobytes(cmd));
+            result = DataTransform.hexTobytes(cmd);
         }
+
+        bleWritePack(result);
     }
 
     /**
@@ -503,7 +543,78 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      */
     private void bleWriteData(byte[] data){
         if(bleDeviceMirror != null){
+            sendLen += data.length;
             bleDeviceMirror.writeData(data);
+
+            Message message = handler.obtainMessage();
+            message.what = CODE_BLE_SEND;
+            message.sendToTarget();
         }
+    }
+
+    /**
+     * 大于20字节，分包发送
+     * @param data
+     */
+    private void bleWritePack(byte[] data){
+        if (dataInfoQueue != null) {
+            dataInfoQueue.clear();
+            dataInfoQueue = splitPacketForByte(data);
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    send();
+                }
+            });
+        }
+    }
+
+    //发送队列，提供一种简单的处理方式，实际项目场景需要根据需求优化
+    private Queue<byte[]> dataInfoQueue = new LinkedList<>();
+    private void send() {
+        if (dataInfoQueue != null && !dataInfoQueue.isEmpty()) {
+            if (dataInfoQueue.peek() != null && bleDeviceMirror != null) {
+                bleWriteData(dataInfoQueue.poll());
+            }
+            if (dataInfoQueue.peek() != null) {
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        send();
+                    }
+                }, 5);
+            }
+        }
+    }
+
+    /**
+     * 数据分包
+     *
+     * @param data
+     * @return
+     */
+    private Queue<byte[]> splitPacketForByte(byte[] data) {
+        Queue<byte[]> dataInfoQueue = new LinkedList<>();
+        int pack_len = isChangeMTU ? send_max_len : send_min_len;
+//        ViseLog.d("Pack len: %s", pack_len);
+        if (data != null) {
+            int index = 0;
+            do {
+                byte[] surplusData = new byte[data.length - index];
+                byte[] currentData;
+                System.arraycopy(data, index, surplusData, 0, data.length - index);
+                if (surplusData.length <= pack_len) {
+                    currentData = new byte[surplusData.length];
+                    System.arraycopy(surplusData, 0, currentData, 0, surplusData.length);
+                    index += surplusData.length;
+                } else {
+                    currentData = new byte[pack_len];
+                    System.arraycopy(data, index, currentData, 0, pack_len);
+                    index += pack_len;
+                }
+                dataInfoQueue.offer(currentData);
+            } while (index < data.length);
+        }
+        return dataInfoQueue;
     }
 }
